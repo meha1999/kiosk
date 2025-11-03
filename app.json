@@ -9,7 +9,8 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.meha1999.expokioskprebuild"
     },
     "android": {
       "adaptiveIcon": {
@@ -52,6 +53,10 @@
         "projectId": "bd69420c-1959-4bd2-a5c3-2d3e6095c665"
       }
     },
-    "owner": "meha1999"
+    "owner": "meha1999",
+    "runtimeVersion": "1.0.0",
+    "updates": {
+      "url": "https://u.expo.dev/bd69420c-1959-4bd2-a5c3-2d3e6095c665"
+    }
   }
 }
