@@ -1,199 +1,379 @@
 // plugins/kiosk-plugin.js
+const fs = require("fs");
+const path = require("path");
 const {
-  AndroidConfig,
   withAndroidManifest,
+  withMainActivity,
+  withMainApplication,
   withDangerousMod,
   createRunOncePlugin,
 } = require("@expo/config-plugins");
-const fs = require("fs");
-const path = require("path");
 
-/** Get android package across SDKs */
-function getAndroidPackage(expoConfig) {
-  const fromAPI =
-    AndroidConfig?.Package?.getPackage?.(expoConfig) ??
-    AndroidConfig?.Package?.getAndroidPackage?.(expoConfig);
-  return (
-    fromAPI ??
-    expoConfig?.android?.package ??
-    expoConfig?.expo?.android?.package ??
-    null
-  );
-}
+const pkg = { name: "with-kiosk-full-setup", version: "1.4.0" };
 
 function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
-function writeOnce(filePath, contents) {
-  ensureDir(path.dirname(filePath));
-  if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, contents);
+function writeFile(p, content) {
+  ensureDir(path.dirname(p));
+  fs.writeFileSync(p, content, "utf8");
+  console.log("✅ Created/Updated:", p);
 }
 
-/** Kotlin MainActivity with immersive “kiosk-like” UI (no local overrides that break compilation) */
-function mainActivityKotlin(pkg) {
-  return `package ${pkg}
-
-import android.os.Bundle
-import android.view.View
-import com.facebook.react.ReactActivity
-
-class MainActivity : ReactActivity() {
-  private fun enterImmersiveSticky() {
-    window.decorView.systemUiVisibility =
-      (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-        or View.SYSTEM_UI_FLAG_FULLSCREEN)
-  }
-
-  override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-    enterImmersiveSticky()
-  }
-
-  override fun onResume() {
-    super.onResume()
-    enterImmersiveSticky()
-  }
-
-  override fun onWindowFocusChanged(hasFocus: Boolean) {
-    super.onWindowFocusChanged(hasFocus)
-    if (hasFocus) enterImmersiveSticky()
-  }
-}
-`;
+// Get android package like "com.meha1999.expokioskprebuild"
+function getAppPackage(config) {
+  const appPkg =
+    (config.android && config.android.package) ||
+    config.androidPackage ||
+    config.iosBundleIdentifier;
+  if (!appPkg)
+    throw new Error("Android package not found in config (android.package).");
+  return appPkg;
 }
 
-/** Boot receiver so the app can auto-start after reboot (optional) */
-function bootReceiverJava(pkg) {
-  return `package ${pkg};
+const withManifestTweaks = (config) =>
+  withAndroidManifest(config, (c) => {
+    const appPkg = getAppPackage(c);
+    const kioskFqn = `${appPkg}.kiosk`;
+    const manifest = c.modResults;
 
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-
-public class BootReceiver extends BroadcastReceiver {
-  @Override
-  public void onReceive(Context context, Intent intent) {
-    if (Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) {
-      Intent i = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
-      if (i != null) {
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        context.startActivity(i);
+    // permissions
+    const perms = [
+      "android.permission.RECEIVE_BOOT_COMPLETED",
+      "android.permission.WAKE_LOCK",
+      "android.permission.FOREGROUND_SERVICE",
+    ];
+    manifest.manifest["uses-permission"] =
+      manifest.manifest["uses-permission"] || [];
+    for (const p of perms) {
+      if (
+        !manifest.manifest["uses-permission"].some(
+          (u) => u.$["android:name"] === p
+        )
+      ) {
+        manifest.manifest["uses-permission"].push({ $: { "android:name": p } });
       }
     }
-  }
-}
-`;
-}
 
-/** Manifest edits: permissions, BootReceiver, HOME-category launcher */
-function addManifestBits(androidManifest) {
-  const manifestRoot = androidManifest.manifest;
-  const app = manifestRoot.application?.[0];
-  if (!app) return androidManifest;
+    const app = manifest.manifest.application[0];
 
-  // Permissions
-  manifestRoot["uses-permission"] = manifestRoot["uses-permission"] ?? [];
-  const addPerm = (name) => {
+    // BootReceiver
+    app.receiver = app.receiver || [];
     if (
-      !manifestRoot["uses-permission"].some((p) => p.$["android:name"] === name)
-    ) {
-      manifestRoot["uses-permission"].push({ $: { "android:name": name } });
-    }
-  };
-  addPerm("android.permission.RECEIVE_BOOT_COMPLETED");
-  addPerm("android.permission.WAKE_LOCK");
-
-  // Boot receiver
-  app.receiver = app.receiver ?? [];
-  if (!app.receiver.some((r) => r.$?.["android:name"] === ".BootReceiver")) {
-    app.receiver.push({
-      $: {
-        "android:name": ".BootReceiver",
-        "android:enabled": "true",
-        "android:exported": "true",
-      },
-      "intent-filter": [
-        {
-          action: [
-            { $: { "android:name": "android.intent.action.BOOT_COMPLETED" } },
-          ],
-        },
-      ],
-    });
-  }
-
-  // Make MainActivity a launcher + HOME
-  const activities = app.activity ?? [];
-  const main = activities.find((a) =>
-    (a?.$?.["android:name"] || "").endsWith(".MainActivity")
-  );
-  if (main) {
-    main.$["android:exported"] = "true";
-    main["intent-filter"] = main["intent-filter"] ?? [];
-    const alreadyHome = main["intent-filter"].some((f) =>
-      (f.category || []).some(
-        (c) => c.$?.["android:name"] === "android.intent.category.HOME"
+      !app.receiver.some(
+        (r) => r.$["android:name"] === `${kioskFqn}.BootReceiver`
       )
-    );
-    if (!alreadyHome) {
-      main["intent-filter"].push({
-        action: [{ $: { "android:name": "android.intent.action.MAIN" } }],
-        category: [
-          { $: { "android:name": "android.intent.category.LAUNCHER" } },
-          { $: { "android:name": "android.intent.category.DEFAULT" } },
-          { $: { "android:name": "android.intent.category.HOME" } },
+    ) {
+      app.receiver.push({
+        $: {
+          "android:name": `${kioskFqn}.BootReceiver`,
+          "android:exported": "true",
+          "android:enabled": "true",
+        },
+        "intent-filter": [
+          {
+            action: [
+              { $: { "android:name": "android.intent.action.BOOT_COMPLETED" } },
+              {
+                $: {
+                  "android:name": "android.intent.action.LOCKED_BOOT_COMPLETED",
+                },
+              },
+            ],
+          },
         ],
       });
     }
-  }
 
-  return androidManifest;
-}
+    // KioskService
+    app.service = app.service || [];
+    if (
+      !app.service.some(
+        (s) => s.$["android:name"] === `${kioskFqn}.KioskService`
+      )
+    ) {
+      app.service.push({
+        $: {
+          "android:name": `${kioskFqn}.KioskService`,
+          "android:exported": "false",
+        },
+      });
+    }
 
-const withKiosk = (config) => {
-  const androidPackage = getAndroidPackage(config);
-  if (!androidPackage) {
-    throw new Error(
-      'Cannot determine android.package. Set it in app.json under { "android": { "package": "com.your.app" } }.'
-    );
-  }
-
-  // 1) Manifest edits
-  config = withAndroidManifest(config, (c) => {
-    c.modResults = addManifestBits(c.modResults);
     return c;
   });
 
-  // 2) Write sources (don’t rely on withMainActivity)
-  config = withDangerousMod(config, [
+const withMainActivityPatch = (config) =>
+  withMainActivity(config, (c) => {
+    const appPkg = getAppPackage(c);
+    const kioskFqn = `${appPkg}.kiosk`;
+    const filePath = c.modResults.path;
+    let src = fs.readFileSync(filePath, "utf8");
+
+    // import CrashHandler
+    if (!src.includes(`import ${kioskFqn}.CrashHandler`)) {
+      src = src.replace(
+        /^package[^\n]*\n/,
+        (m) => m + `import ${kioskFqn}.CrashHandler\n`
+      );
+    }
+
+    // add flags + install
+    if (!src.includes("CrashHandler.install(")) {
+      const needle = /super\.onCreate\(null\)\s*\n/;
+      if (needle.test(src)) {
+        src = src.replace(
+          needle,
+          `super.onCreate(null)
+    // Kiosk additions
+    window.addFlags(
+      android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+      android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+      android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+    )
+    CrashHandler.install(application)
+`
+        );
+        fs.writeFileSync(filePath, src, "utf8");
+        console.log("✅ Patched MainActivity.kt");
+      } else {
+        console.warn(
+          "⚠️ Could not find 'super.onCreate(null)' in MainActivity.kt; please patch manually."
+        );
+      }
+    }
+    return c;
+  });
+
+const withKioskFiles = (config) =>
+  withDangerousMod(config, [
     "android",
-    async (c) => {
-      const srcBase = path.join(
-        c.modRequest.projectRoot,
-        "android",
-        "app",
-        "src",
-        "main",
-        "java",
-        ...androidPackage.split(".")
+    (c) => {
+      const projectRoot = c.modRequest.projectRoot;
+      const appPkg = getAppPackage(c);
+      const pkgPath = appPkg.replace(/\./g, "/");
+      const base = path.join(
+        projectRoot,
+        `android/app/src/main/java/${pkgPath}/kiosk`
       );
-      writeOnce(
-        path.join(srcBase, "MainActivity.kt"),
-        mainActivityKotlin(androidPackage)
+
+      // KioskModule.kt
+      writeFile(
+        path.join(base, "KioskModule.kt"),
+        `package ${appPkg}.kiosk
+
+import android.app.Activity
+import android.view.WindowManager
+import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.bridge.ReactMethod
+
+class KioskModule(private val reactContext: ReactApplicationContext) :
+  ReactContextBaseJavaModule(reactContext) {
+
+  override fun getName() = "Kiosk"
+
+  @ReactMethod
+  fun startLockTask(promise: Promise) {
+    val activity: Activity? = reactContext.currentActivity
+    if (activity == null) { promise.reject("NO_ACTIVITY", "No activity"); return }
+    try { activity.startLockTask(); promise.resolve(true) }
+    catch (e: Exception) { promise.reject("LOCK_FAIL", e) }
+  }
+
+  @ReactMethod
+  fun stopLockTask(promise: Promise) {
+    val activity: Activity? = reactContext.currentActivity
+    if (activity == null) { promise.reject("NO_ACTIVITY", "No activity"); return }
+    try { activity.stopLockTask(); promise.resolve(true) }
+    catch (e: Exception) { promise.reject("UNLOCK_FAIL", e) }
+  }
+
+  @ReactMethod
+  fun setKioskWindowFlags(promise: Promise) {
+    val activity: Activity? = reactContext.currentActivity
+    if (activity == null) { promise.reject("NO_ACTIVITY", "No activity"); return }
+    activity.runOnUiThread {
+      @Suppress("DEPRECATION")
+      activity.window.addFlags(
+        WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+        WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+      )
+      promise.resolve(true)
+    }
+  }
+}
+`
       );
-      writeOnce(
-        path.join(srcBase, "BootReceiver.java"),
-        bootReceiverJava(androidPackage)
+
+      // KioskPackage.kt
+      writeFile(
+        path.join(base, "KioskPackage.kt"),
+        `package ${appPkg}.kiosk
+
+import com.facebook.react.ReactPackage
+import com.facebook.react.bridge.NativeModule
+import com.facebook.react.uimanager.ViewManager
+import com.facebook.react.bridge.ReactApplicationContext
+
+class KioskPackage : ReactPackage {
+  override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> =
+    listOf(KioskModule(reactContext))
+  override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =
+    emptyList()
+}
+`
       );
+
+      // CrashHandler.kt
+      writeFile(
+        path.join(base, "CrashHandler.kt"),
+        `package ${appPkg}.kiosk
+
+import android.app.Application
+import android.content.Intent
+import android.os.Process
+
+object CrashHandler : Thread.UncaughtExceptionHandler {
+  private var defaultHandler: Thread.UncaughtExceptionHandler? = null
+  private var app: Application? = null
+
+  fun install(app_: Application) {
+    app = app_
+    defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+    Thread.setDefaultUncaughtExceptionHandler(this)
+  }
+
+  override fun uncaughtException(t: Thread, e: Throwable) {
+    try {
+      val i = app?.packageManager?.getLaunchIntentForPackage(app!!.packageName)
+      i?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+      app?.startActivity(i)
+    } catch (_: Exception) {}
+    defaultHandler?.uncaughtException(t, e)
+    Process.killProcess(Process.myPid())
+    System.exit(10)
+  }
+}
+`
+      );
+
+      // BootReceiver.kt
+      writeFile(
+        path.join(base, "BootReceiver.kt"),
+        `package ${appPkg}.kiosk
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+
+class BootReceiver : BroadcastReceiver() {
+  override fun onReceive(context: Context, intent: Intent) {
+    if (intent.action == Intent.ACTION_BOOT_COMPLETED ||
+        intent.action == Intent.ACTION_LOCKED_BOOT_COMPLETED) {
+      val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+      if (launch != null) {
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        context.startActivity(launch)
+      }
+      val svc = Intent(context, KioskService::class.java)
+      if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(svc) else context.startService(svc)
+    }
+  }
+}
+`
+      );
+
+      // KioskService.kt
+      writeFile(
+        path.join(base, "KioskService.kt"),
+        `package ${appPkg}.kiosk
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Intent
+import android.os.Build
+import android.os.IBinder
+
+class KioskService : Service() {
+  override fun onCreate() {
+    super.onCreate()
+    val channelId = "kiosk_service"
+    if (Build.VERSION.SDK_INT >= 26) {
+      val nm = getSystemService(NotificationManager::class.java)
+      val ch = NotificationChannel(channelId, "Kiosk", NotificationManager.IMPORTANCE_LOW)
+      nm.createNotificationChannel(ch)
+    }
+    val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+    val pi = PendingIntent.getActivity(this, 0, launchIntent, PendingIntent.FLAG_IMMUTABLE)
+    val n = Notification.Builder(this, if (Build.VERSION.SDK_INT >= 26) channelId else "")
+      .setContentTitle("Kiosk running")
+      .setContentText("Keeping the app active")
+      .setSmallIcon(android.R.drawable.stat_notify_more)
+      .setContentIntent(pi)
+      .build()
+    startForeground(1, n)
+  }
+  override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+  override fun onBind(intent: Intent?): IBinder? = null
+}
+`
+      );
+
       return c;
     },
   ]);
 
-  return config;
-};
+const withMainApplicationPatch = (config) =>
+  withMainApplication(config, (c) => {
+    const appPkg = getAppPackage(c);
+    const kioskFqn = `${appPkg}.kiosk`;
+    const filePath = c.modResults.path;
+    let src = fs.readFileSync(filePath, "utf8");
 
-module.exports = createRunOncePlugin(withKiosk, "kiosk-plugin", "1.0.1");
+    // import KioskPackage
+    if (!src.includes(`import ${kioskFqn}.KioskPackage`)) {
+      src = src.replace(
+        /^package[^\n]*\n/,
+        (m) => m + `import ${kioskFqn}.KioskPackage\n`
+      );
+    }
+
+    // add(KioskPackage())
+    if (!src.includes("add(KioskPackage())")) {
+      const reApply =
+        /PackageList\(this\)\.packages\.apply\s*\{\s*([\s\S]*?)\}/m;
+      if (reApply.test(src)) {
+        src = src.replace(reApply, (match, inner) =>
+          inner.includes("add(KioskPackage())")
+            ? match
+            : `PackageList(this).packages.apply {\n${inner}\n  add(KioskPackage())\n}`
+        );
+      } else {
+        src = src.replace(
+          /override fun getPackages\(\): List<ReactPackage>\s*=\s*PackageList\(this\)\.packages/,
+          "override fun getPackages(): List<ReactPackage> = PackageList(this).packages.apply {\n  add(KioskPackage())\n}"
+        );
+      }
+    }
+
+    fs.writeFileSync(filePath, src, "utf8");
+    console.log("✅ Patched MainApplication.kt");
+    return c;
+  });
+
+function withKioskFullSetup(config) {
+  config = withKioskFiles(config);
+  config = withManifestTweaks(config);
+  config = withMainActivityPatch(config);
+  config = withMainApplicationPatch(config);
+  return config;
+}
+
+module.exports = createRunOncePlugin(withKioskFullSetup, pkg.name, pkg.version);

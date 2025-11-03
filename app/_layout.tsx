@@ -1,22 +1,29 @@
 import { Slot } from "expo-router";
+import { StatusBar } from "expo-status-bar";
 import { useEffect } from "react";
-import { BackHandler } from "react-native";
-import { setStatusBarHidden } from "expo-status-bar";
-import {
-  activateKeepAwakeAsync,
-} from "expo-keep-awake";
+import * as SystemUI from "expo-system-ui";
+import { useKeepAwake } from "expo-keep-awake";
+import { NativeModules, Alert } from "react-native";
 
 export default function RootLayout() {
-  useEffect(() => {
-    setStatusBarHidden(true, "none");
-    activateKeepAwakeAsync();
+  useKeepAwake(); // extra safety: prevent sleeping
 
-    const sub = BackHandler.addEventListener("hardwareBackPress", () => true);
-    return () => {
-      sub.remove();
-      setStatusBarHidden(false, "fade");
-    };
+  console.log("NativeModules.Kiosk =", NativeModules.Kiosk);
+  if (!NativeModules.Kiosk) {
+    Alert.alert(
+      "Kiosk native module is missing",
+      "Ensure KioskPackage() is registered in MainApplication.kt and the plugin patch ran."
+    );
+  }
+  
+  useEffect(() => {
+    SystemUI.setBackgroundColorAsync("#000000").catch(() => {});
   }, []);
 
-  return <Slot />;
+  return (
+    <>
+      <Slot />
+      <StatusBar style="light" />
+    </>
+  );
 }

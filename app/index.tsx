@@ -1,145 +1,102 @@
 // app/index.tsx
-import React, { useEffect, useRef, useState } from "react";
+import { disableKiosk, enableKiosk, setKioskWindowFlags } from "@/hooks/kiosk";
+import { useEffect, useState } from "react";
 import {
-  StyleSheet,
-  Text,
   View,
-  TouchableOpacity,
-  TextInput,
-  BackHandler,
+  Text,
+  Pressable,
+  StyleSheet,
+  AppState,
   Alert,
-  TouchableWithoutFeedback,
 } from "react-native";
+import { NativeModules } from "react-native";
 
-export default function Screen() {
-  const [taps, setTaps] = useState(0);
-  const [showAdmin, setShowAdmin] = useState(false);
-  const [pin, setPin] = useState("");
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+export default function Home() {
+  const [state, setState] = useState("UNKNOWN");
+  const [pinningOn, setPinningOn] = useState<boolean | string>("?");
 
-  // --- reset idle timeout on any touch ---
-  const resetIdleTimer = () => {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    idleTimer.current = setTimeout(() => {
-      console.log("Idle timeout — exiting app");
-      BackHandler.exitApp(); // auto-exit after timeout
-    }, 5 * 60 * 1000); // 5 minutes
-  };
+  async function refresh() {
+    const { Kiosk } = NativeModules as any;
+    if (!Kiosk) {
+      Alert.alert(
+        "No native module",
+        "Run with a dev client or installed APK."
+      );
+      return;
+    }
+    setPinningOn(await Kiosk.isScreenPinningEnabled());
+    setState(await Kiosk.getLockTaskState());
+  }
 
   useEffect(() => {
-    resetIdleTimer(); // start timer
-    const sub = BackHandler.addEventListener("hardwareBackPress", () => true);
-    return () => {
-      sub.remove();
-      if (idleTimer.current) clearTimeout(idleTimer.current);
-    };
+    const sub = AppState.addEventListener("change", async (s) => {
+      if (s === "active") {
+        try {
+          await setKioskWindowFlags();
+          await enableKiosk(); // will trigger dialog the first time on non-device-owner
+        } catch (e: any) {
+          Alert.alert("enableKiosk error", String(e?.message ?? e));
+        }
+        refresh();
+      }
+    });
+    refresh();
+    return () => sub.remove();
   }, []);
 
-  useEffect(() => {
-    if (taps === 0) return;
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setTaps(0), 1500);
-    if (taps >= 7) {
-      setTaps(0);
-      setShowAdmin(true);
-    }
-  }, [taps]);
-
-  const exit = () => {
-    if (pin === "1234") {
-      Alert.alert("Unlocked", "Exiting app…");
-      BackHandler.exitApp();
-    } else {
-      Alert.alert("Wrong PIN");
-      setPin("");
-    }
-  };
-
-  // --- wrap everything in a TouchableWithoutFeedback to detect any tap ---
   return (
-    <TouchableWithoutFeedback onPress={resetIdleTimer}>
-      <View style={styles.container}>
-        <View style={styles.topBar}>
-          <Text style={styles.title}>Kiosk</Text>
-        </View>
-        <View style={styles.body}>
-          <Text style={styles.big}>Kiosk Mode Active</Text>
-          <Text style={styles.small}>Tap top-right corner 7× for admin.</Text>
-        </View>
+    <View style={styles.c}>
+      <Text style={styles.h1}>Expo Kiosk</Text>
+      <Text style={styles.p}>Screen pinning enabled: {String(pinningOn)}</Text>
+      <Text style={styles.p}>Lock task state: {state}</Text>
 
-        <TouchableOpacity
-          style={styles.secret}
-          onPress={() => setTaps((c) => c + 1)}
-        />
+      <Pressable
+        style={styles.btn}
+        onPress={async () => {
+          try {
+            await setKioskWindowFlags();
+            await enableKiosk();
+          } catch (e: any) {
+            Alert.alert("Re-Pin error", String(e?.message ?? e));
+          }
+          refresh();
+        }}
+      >
+        <Text style={styles.btnT}>Re-Pin</Text>
+      </Pressable>
 
-        {showAdmin && (
-          <View style={styles.admin}>
-            <Text style={styles.adminTitle}>Admin Unlock</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="PIN"
-              value={pin}
-              onChangeText={setPin}
-              secureTextEntry
-              keyboardType="numeric"
-            />
-            <View style={styles.actions}>
-              <TouchableOpacity
-                style={styles.btn}
-                onPress={() => setShowAdmin(false)}
-              >
-                <Text>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.btn, styles.primary]}
-                onPress={exit}
-              >
-                <Text style={styles.white}>Exit</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
-      </View>
-    </TouchableWithoutFeedback>
+      <Pressable
+        style={[styles.btn, { backgroundColor: "#444" }]}
+        onPress={async () => {
+          try {
+            await disableKiosk();
+          } catch (e: any) {
+            Alert.alert("Unpin error", String(e?.message ?? e));
+          }
+          refresh();
+        }}
+      >
+        <Text style={styles.btnT}>Unpin</Text>
+      </Pressable>
+    </View>
   );
 }
-
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0b1220" },
-  topBar: { height: 56, justifyContent: "center", paddingHorizontal: 16 },
-  title: { color: "#fff", fontSize: 18, fontWeight: "600" },
-  body: { flex: 1, justifyContent: "center", alignItems: "center" },
-  big: { color: "#fff", fontSize: 26, marginBottom: 6 },
-  small: { color: "#9aa0a6" },
-  secret: { position: "absolute", top: 0, right: 0, width: 90, height: 90 },
-  admin: {
-    position: "absolute",
-    left: 20,
-    right: 20,
-    top: "30%",
-    backgroundColor: "#fff",
-    padding: 16,
-    borderRadius: 8,
-    elevation: 6,
+  c: {
+    flex: 1,
+    backgroundColor: "#000",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
   },
-  adminTitle: { fontSize: 18, fontWeight: "700", marginBottom: 8 },
-  input: {
-    borderWidth: 1,
-    borderColor: "#ddd",
-    borderRadius: 6,
-    padding: 8,
-    marginBottom: 12,
-    backgroundColor: "#fafafa",
-  },
-  actions: { flexDirection: "row", justifyContent: "flex-end" },
+  h1: { color: "#fff", fontSize: 26, fontWeight: "700", marginBottom: 16 },
+  p: { color: "#9aa4b2", marginBottom: 8 },
   btn: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    marginLeft: 8,
-    borderRadius: 6,
-    backgroundColor: "#eee",
+    backgroundColor: "#1f6feb",
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    borderRadius: 12,
+    marginTop: 12,
   },
-  primary: { backgroundColor: "#007aff" },
-  white: { color: "#fff" },
+  btnT: { color: "#fff", fontWeight: "600" },
 });
